@@ -204,6 +204,21 @@ app.get('/api/pencairan/riwayat/:id_pelanggan', async (req, res) => {
     }
 });
 
+// POST Register Akun Baru (Support nama_usaha)
+app.post('/api/auth/register', async (req, res) => {
+    const { nama, nama_usaha, email, password, no_hp, jenis_pelanggan, alamat } = req.body;
+    try {
+        const result = await sql.query`
+            INSERT INTO m_pengguna (nama, nama_usaha, email, password_hash, no_hp, peran, jenis_pelanggan, alamat, aktif)
+            OUTPUT INSERTED.id_pengguna, INSERTED.nama, INSERTED.email, INSERTED.peran
+            VALUES (${nama}, ${nama_usaha || null}, ${email}, ${password}, ${no_hp}, 'PELANGGAN', ${jenis_pelanggan || 'RUMAH_TANGGA'}, ${alamat}, 1)
+        `;
+        res.status(201).json({ status: 'success', message: 'Registrasi berhasil!', data: result.recordset[0] });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+});
+
 // ==========================================
 // 5. JENIS SAMPAH & ESTIMASI KARBON (m_jenis_sampah)
 // ==========================================
