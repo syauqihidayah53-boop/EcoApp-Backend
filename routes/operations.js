@@ -67,6 +67,14 @@ module.exports=function(app,{pool,requireUser,admin,options}){
  route('patch','/api/penjualan/:id/kirim',admin,u.wrap(async(req,res)=>{
   const r=await u.write(pool,req.actor,async c=>{const id=integer(req.params.id),x=await c.query("UPDATE public.penjualan SET status='DIKIRIM',waktu_pengiriman=now() WHERE id_penjualan=$1 AND status='DRAFT' RETURNING *",[id]);u.check(x.rows.length,'Penjualan tidak dalam status draft.',409);return x.rows[0];});u.ok(res,r);
  }));
+ route('patch','/api/penjualan/:id/batal',admin,u.wrap(async(req,res)=>{
+  const r=await u.write(pool,req.actor,async c=>{
+   const id=integer(req.params.id);
+   const x=await c.query("UPDATE public.penjualan SET status='DIBATALKAN' WHERE id_penjualan=$1 AND status='DRAFT' AND aktif=1 RETURNING *",[id]);
+   u.check(x.rows.length,'Hanya draft aktif yang dapat dibatalkan.',409);
+   return x.rows[0];
+  });u.ok(res,r);
+ }));
  route('put','/api/penjualan/konfirmasi/:id',u.wrap(async(req,res)=>{
   u.check(req.actor.peran===5,'Hanya mitra tujuan yang dapat menerima penjualan.',403);const b=req.body;u.fields(b,['detail','catatan']);u.check(Array.isArray(b.detail)&&b.detail.length>0,'Rincian timbang wajib diisi.');
   const rows=b.detail.map(d=>({id:integer(d.id_detail_penjualan),accepted:u.decimal(d.berat_diterima_kg,'Berat diterima',999999999,3),rejected:u.decimal(d.berat_ditolak_kg,'Berat ditolak',999999999,3),reason:u.text(d.alasan_penolakan,'Alasan penolakan',255,Number(d.berat_ditolak_kg)>0),note:u.text(d.catatan_selisih_timbang,'Catatan selisih',255)}));
@@ -87,7 +95,12 @@ module.exports=function(app,{pool,requireUser,admin,options}){
   });u.ok(res,result);
  }));
  route('get','/api/laporan/stok',admin,u.wrap(async(req,res)=>{
-  const r=await pool.query(`SELECT dp.id_drop_point,dp.nama_drop_point,j.id_jenis_sampah,j.nama_jenis,COALESCE(sum(ds.berat_masuk_drop_point_kg) FILTER(WHERE s.status=3 AND s.status_drop_point=3),0) AS masuk FROM public.drop_point dp CROSS JOIN public.jenis_sampah j LEFT JOIN public.setoran s ON s.id_drop_point=dp.id_drop_point AND s.aktif=1 LEFT JOIN public.detail_setoran ds ON ds.id_setoran=s.id_setoran AND ds.id_jenis_sampah=j.id_jenis_sampah AND ds.aktif=1 GROUP BY dp.id_drop_point,j.id_jenis_sampah ORDER BY dp.id_drop_point,j.id_jenis_sampah`);u.ok(res,r.rows);
+  const r=await pool.query(`SELECT dp.id_drop_point,dp.nama_drop_point,j.id_jenis_sampah,j.nama_jenis,
+   COALESCE((SELECT sum(ds.berat_masuk_drop_point_kg) FROM public.detail_setoran ds JOIN public.setoran s ON s.id_setoran=ds.id_setoran WHERE s.id_drop_point=dp.id_drop_point AND s.status=3 AND s.status_drop_point=3 AND s.aktif=1 AND ds.aktif=1 AND ds.id_jenis_sampah=j.id_jenis_sampah),0) AS berat_masuk_final_kg,
+   COALESCE((SELECT sum(dj.berat_dikirim_kg) FROM public.detail_penjualan dj JOIN public.penjualan p ON p.id_penjualan=dj.id_penjualan WHERE p.id_drop_point=dp.id_drop_point AND p.status<>'DIBATALKAN' AND p.aktif=1 AND dj.aktif=1 AND dj.id_jenis_sampah=j.id_jenis_sampah),0) AS berat_dikirim_kg,
+   COALESCE((SELECT sum(dj.berat_retur_kembali_kg) FROM public.detail_penjualan dj JOIN public.penjualan p ON p.id_penjualan=dj.id_penjualan WHERE p.id_drop_point=dp.id_drop_point AND p.status<>'DIBATALKAN' AND p.aktif=1 AND dj.aktif=1 AND dj.id_jenis_sampah=j.id_jenis_sampah),0) AS berat_retur_kembali_kg
+   FROM public.drop_point dp CROSS JOIN public.jenis_sampah j WHERE dp.is_deleted=0 AND j.is_deleted=0 ORDER BY dp.id_drop_point,j.id_jenis_sampah`);
+  u.ok(res,r.rows.map(row=>({...row,masuk:row.berat_masuk_final_kg,stok_tersedia_kg:Number(row.berat_masuk_final_kg)-Number(row.berat_dikirim_kg)+Number(row.berat_retur_kembali_kg)})));
  }));
  route('get','/api/mutasi-kas',admin,u.wrap(async(req,res)=>u.ok(res,(await pool.query('SELECT * FROM public.mutasi_kas WHERE aktif=1 ORDER BY id_mutasi_kas DESC')).rows)));
  route('get','/api/mutasi-kas/ringkasan',admin,u.wrap(async(req,res)=>{
