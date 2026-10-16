@@ -754,3 +754,68 @@ app.get('/api/dashboard-pengelola', async (req, res) => {
         return res.status(200).json({ status: 'success', data: null });
     }
 });
+
+
+// GET Detail Setoran beserta Detail Materialnya untuk T05 (Terima di Titik)
+app.get('/api/setoran/detail/:id_setoran', async (req, res) => {
+    const { id_setoran } = req.params;
+    try {
+        // 1. Ambil data Header Setoran
+        const header = await sql.query`
+            SELECT s.*, p.nama AS pelanggan 
+            FROM t_setoran s 
+            JOIN m_pengguna p ON s.id_pelanggan = p.id_pengguna 
+            WHERE s.id_setoran = ${id_setoran}
+        `;
+        
+        if (header.recordset.length === 0) {
+            return res.status(404).json({ status: 'error', message: 'Setoran tidak ditemukan' });
+        }
+
+        // 2. Ambil data Detail Material (Jenis Sampah & Berat)
+        const detail = await sql.query`
+            SELECT ds.id_detail_setoran, ds.id_jenis_sampah, js.nama_jenis AS jenis, ds.berat_diterima_kg AS beratDiterimaAwal 
+            FROM t_detail_setoran ds 
+            JOIN m_jenis_sampah js ON ds.id_jenis_sampah = js.id_jenis_sampah 
+            WHERE ds.id_setoran = ${id_setoran}
+        `;
+
+        // Gabungkan dan kirim ke Angular
+        const result = header.recordset[0];
+        result.detailMaterial = detail.recordset;
+
+        res.status(200).json({ status: 'success', data: result });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+});
+
+// PUT Update Terima Fisik di Drop Point (T05)
+app.put('/api/setoran/terima/:id_setoran', async (req, res) => {
+    const { id_setoran } = req.params;
+    const { status_terima_drop_point, catatan_serah_terima, detailMaterial } = req.body;
+
+    try {
+        // 1. Update status akhir di t_setoran (DITERIMA / SELISIH)
+        await sql.query`
+            UPDATE t_setoran 
+            SET status_terima_drop_point = ${status_terima_drop_point}, 
+                catatan_serah_terima = ${catatan_serah_terima},
+                waktu_terima_drop_point = SYSUTCDATETIME()
+            WHERE id_setoran = ${id_setoran}
+        `;
+
+        // 2. Update berat aktual fisik di t_detail_setoran
+        for (let item of detailMaterial) {
+            await sql.query`
+                UPDATE t_detail_setoran 
+                SET berat_masuk_drop_point_kg = ${item.beratMasukFisik}
+                WHERE id_detail_setoran = ${item.id_detail_setoran}
+            `;
+        }
+
+        res.status(200).json({ status: 'success', message: 'Penerimaan fisik berhasil dicatat!' });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+});
