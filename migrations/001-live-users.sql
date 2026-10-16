@@ -1,0 +1,11 @@
+BEGIN;
+ALTER TABLE public.pengguna ADD COLUMN IF NOT EXISTS foto_profil text;
+ALTER TABLE public.pengguna ADD COLUMN IF NOT EXISTS token_version integer NOT NULL DEFAULT 0;
+ALTER TABLE public.setoran ADD COLUMN IF NOT EXISTS request_key uuid UNIQUE;
+ALTER TABLE public.pencairan_poin ADD COLUMN IF NOT EXISTS request_key uuid UNIQUE;
+ALTER TABLE public.penjualan ADD COLUMN IF NOT EXISTS request_key uuid UNIQUE;
+ALTER TABLE public.mutasi_kas ADD COLUMN IF NOT EXISTS request_key uuid UNIQUE;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_pengguna_email_lower ON public.pengguna(lower(email));
+CREATE INDEX IF NOT EXISTS ix_setoran_pengguna ON public.setoran(id_pengguna);
+CREATE INDEX IF NOT EXISTS ix_pencairan_pengguna ON public.pencairan_poin(id_pengguna);
+COMMIT;
