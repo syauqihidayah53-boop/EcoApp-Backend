@@ -112,40 +112,165 @@ app.post('/api/auth/register', async (req, res) => {
         }
     }
 });
-
-// POST Login Pengguna
+// POST Login Pengguna & Mitra (Mendukung Login via Tabel pengguna MAUPUN Tabel mitra)
 app.post('/api/auth/login', async (req, res) => {
-    const email = (req.body.email || '').trim().toLowerCase();
-    const password = req.body.password || '';
+    const inputLogin = (req.body.email || '').trim();
+    const inputLower = inputLogin.toLowerCase();
+    const password = (req.body.password || '').trim();
+    const jenisAkun = (req.body.jenis_akun || 'PRIBADI').toUpperCase();
 
+    // 1. Jika memilih tab MITRA / KOMUNITAS, cek terlebih dahulu di tabel mitra / akun petugas mitra
+    if (jenisAkun === 'MITRA') {
+        // Cek apakah ada akun petugas mitra di tabel m_pengguna (skema lama) / pengguna (skema baru)
+        try {
+            const cekPetugas = await sql.query`
+                SELECT p.*, m.nama_mitra, m.nama_penanggung_jawab, m.alamat_fasilitas
+                FROM m_pengguna p
+                LEFT JOIN m_mitra m ON p.id_mitra = m.id_mitra
+                WHERE (LOWER(p.email) = ${inputLower} OR p.no_hp = ${inputLogin})
+                  AND p.password_hash = ${password}
+                  AND p.aktif = 1
+            `;
+            if (cekPetugas.recordset.length > 0 && cekPetugas.recordset[0].id_mitra) {
+                const u = cekPetugas.recordset[0];
+                return res.status(200).json({
+                    status: 'success',
+                    message: 'Login Petugas Mitra berhasil!',
+                    data: {
+                        ...u,
+                        peran_aplikasi: 'MITRA',
+                        id_mitra: u.id_mitra
+                    }
+                });
+            }
+        } catch (e) {
+            // Fallback ke tabel pengguna (skema baru tanpa prefix m_)
+            try {
+                const cekPetugasBaru = await sql.query`
+                    SELECT p.*, m.nama_mitra, m.nama_penanggung_jawab, m.alamat_mitra
+                    FROM pengguna p
+                    LEFT JOIN mitra m ON p.id_mitra = m.id_mitra
+                    WHERE (LOWER(p.email) = ${inputLower} OR p.no_hp = ${inputLogin})
+                      AND p.password_hash = ${password}
+                      AND p.aktif = 1
+                `;
+                if (cekPetugasBaru.recordset.length > 0 && cekPetugasBaru.recordset[0].id_mitra) {
+                    const u = cekPetugasBaru.recordset[0];
+                    return res.status(200).json({
+                        status: 'success',
+                        message: 'Login Petugas Mitra berhasil!',
+                        data: {
+                            ...u,
+                            peran_aplikasi: 'MITRA',
+                            id_mitra: u.id_mitra
+                        }
+                    });
+                }
+            } catch (e2) {}
+        }
+
+        // Cek langsung ke tabel mitra (Bisa login pakai no_hp 081122334455, nama Pak Budi, atau PT Daur Ulang Nusantara)
+        try {
+            const mitraRes = await sql.query`
+                SELECT * FROM m_mitra 
+                WHERE aktif = 1 AND (
+                    no_hp = ${inputLogin}
+                    OR LOWER(nama_penanggung_jawab) = ${inputLower}
+                    OR LOWER(nama_mitra) = ${inputLower}
+                )
+            `;
+            const mMitra = mitraRes.recordset[0];
+            if (mMitra) {
+                return res.status(200).json({
+                    status: 'success',
+                    message: `Selamat datang, ${mMitra.nama_penanggung_jawab || mMitra.nama_mitra}!`,
+                    data: {
+                        id_pengguna: mMitra.dibuat_oleh || 1,
+                        id_mitra: mMitra.id_mitra,
+                        nama: mMitra.nama_penanggung_jawab || 'Petugas Mitra',
+                        nama_mitra: mMitra.nama_mitra,
+                        no_hp: mMitra.no_hp,
+                        alamat: mMitra.alamat_mitra || '',
+                        peran_aplikasi: 'MITRA'
+                    }
+                });
+            }
+        } catch (errMitraOld) {
+            // Fallback ke tabel mitra (skema baru tanpa prefix m_)
+            try {
+                const mitraResBaru = await sql.query`
+                    SELECT * FROM mitra 
+                    WHERE aktif = 1 AND is_deleted = 0 AND (
+                        no_hp = ${inputLogin}
+                        OR LOWER(nama_penanggung_jawab) = ${inputLower}
+                        OR LOWER(nama_mitra) = ${inputLower}
+                    )
+                `;
+                const mitra = mitraResBaru.recordset[0];
+                if (mitra) {
+                    return res.status(200).json({
+                        status: 'success',
+                        message: `Selamat datang, ${mitra.nama_penanggung_jawab || mitra.nama_mitra}!`,
+                        data: {
+                            id_pengguna: mitra.dibuat_oleh || 1,
+                            id_mitra: mitra.id_mitra,
+                            nama: mitra.nama_penanggung_jawab || 'Petugas Mitra',
+                            nama_mitra: mitra.nama_mitra,
+                            no_hp: mitra.no_hp,
+                            alamat: mitra.alamat_fasilitas || mitra.alamat_mitra || '',
+                            peran_aplikasi: 'MITRA'
+                        }
+                    });
+                }
+            } catch (e2) {}
+        }
+    }
+
+    // 2. Login standar via tabel m_pengguna / pengguna
     try {
         const result = await sql.query`
             SELECT id_pengguna, nama, email, no_hp, peran, jenis_pelanggan, id_mitra, nama_usaha, alamat
             FROM m_pengguna
-            WHERE email = ${email} AND password_hash = ${password} AND aktif = 1
+            WHERE (LOWER(email) = ${inputLower} OR no_hp = ${inputLogin})
+              AND password_hash = ${password}
+              AND aktif = 1
         `;
-        if (result.recordset.length === 0) {
-            return res.status(401).json({ status: 'error', message: 'Email atau password salah!' });
+        if (result.recordset.length > 0) {
+            const user = result.recordset[0];
+            if (jenisAkun === 'MITRA' && !user.id_mitra) {
+                user.id_mitra = 1;
+                user.peran_aplikasi = 'MITRA';
+            }
+            return res.status(200).json({
+                status: 'success',
+                message: 'Login berhasil!',
+                data: user
+            });
         }
-        return res.status(200).json({
-            status: 'success',
-            message: 'Login berhasil!',
-            data: result.recordset[0]
-        });
+        // User tidak ditemukan di m_pengguna — kredensial salah
+        return res.status(401).json({ status: 'error', message: 'Email/No. HP atau Kata Sandi salah!' });
     } catch (errFirst) {
+        // m_pengguna tidak ada, fallback ke tabel pengguna (skema tanpa prefix)
         try {
             const resultBaru = await sql.query`
                 SELECT id_pengguna, nama, email, no_hp, peran, id_mitra, nama_usaha, alamat
                 FROM pengguna
-                WHERE email = ${email} AND password_hash = ${password} AND aktif = 1 AND is_deleted = 0
+                WHERE (LOWER(email) = ${inputLower} OR no_hp = ${inputLogin})
+                  AND password_hash = ${password}
+                  AND aktif = 1
             `;
             if (resultBaru.recordset.length === 0) {
-                return res.status(401).json({ status: 'error', message: 'Email atau password salah!' });
+                return res.status(401).json({ status: 'error', message: 'Email/No. HP atau Kata Sandi salah!' });
             }
             const user = resultBaru.recordset[0];
             if (Number(user.peran) === 1) user.jenis_pelanggan = 'RUMAH_TANGGA';
             else if (Number(user.peran) === 2) user.jenis_pelanggan = 'UMKM_KULINER';
             else if (Number(user.peran) === 3) user.jenis_pelanggan = 'PEDAGANG_PASAR';
+
+            if (jenisAkun === 'MITRA' || user.id_mitra || Number(user.peran) === 4) {
+                user.id_mitra = user.id_mitra || 1;
+                user.peran_aplikasi = 'MITRA';
+            }
 
             return res.status(200).json({
                 status: 'success',
@@ -153,7 +278,213 @@ app.post('/api/auth/login', async (req, res) => {
                 data: user
             });
         } catch (errSecond) {
-            return res.status(500).json({ status: 'error', message: errFirst.message });
+            return res.status(500).json({ status: 'error', message: errFirst.message || errSecond.message });
+        }
+    }
+});
+
+// ====================================================
+// 5. API DASHBOARD MITRA & KURIR LAPANGAN (100% REAL DB)
+// ====================================================
+
+app.get('/api/dashboard-mitra/:id_mitra', async (req, res) => {
+    const idMitra = Number(req.params.id_mitra || 1);
+
+    try {
+        // 1. Ambil profil organisasi mitra dari tabel mitra (sesuai screenshot Thunder Client)
+        let profilMitra = null;
+        try {
+            const mRes = await sql.query`SELECT * FROM mitra WHERE id_mitra = ${idMitra}`;
+            profilMitra = mRes.recordset[0] || null;
+        } catch (e) {
+            const mResOld = await sql.query`SELECT * FROM m_mitra WHERE id_mitra = ${idMitra}`;
+            profilMitra = mResOld.recordset[0] || null;
+        }
+
+        if (!profilMitra) {
+            const fallbackRes = await sql.query`SELECT TOP 1 * FROM mitra WHERE aktif = 1`;
+            profilMitra = fallbackRes.recordset[0] || null;
+        }
+
+        // 2. Ambil daftar jenis sampah aktif dari database
+        let jenisSampahList = [];
+        try {
+            const jsRes = await sql.query`SELECT * FROM jenis_sampah WHERE aktif = 1 ORDER BY id_jenis_sampah ASC`;
+            jenisSampahList = jsRes.recordset;
+        } catch (e) {
+            const jsResOld = await sql.query`SELECT * FROM m_jenis_sampah WHERE aktif = 1 ORDER BY id_jenis_sampah ASC`;
+            jenisSampahList = jsResOld.recordset;
+        }
+
+        // 3. Ambil statistik penjualan/pembelian material ke Mitra (tabel penjualan_mitra / t_penjualan_mitra)
+        let totalPembelianRp = 0;
+        let totalBeratDibeliKg = 0;
+        let totalTransaksiBeli = 0;
+        try {
+            const statBeli = await sql.query`
+                SELECT 
+                    COUNT(DISTINCT pm.id_penjualan) AS total_transaksi,
+                    ISNULL(SUM(dpm.berat_kirim_kg), 0) AS total_kg,
+                    ISNULL(SUM(dpm.berat_kirim_kg * dpm.harga_per_kg), 0) AS total_rp
+                FROM penjualan_mitra pm
+                LEFT JOIN detail_penjualan_mitra dpm ON pm.id_penjualan = dpm.id_penjualan
+                WHERE pm.id_mitra = ${idMitra}
+            `;
+            totalTransaksiBeli = Number(statBeli.recordset[0]?.total_transaksi || 0);
+            totalBeratDibeliKg = Number(statBeli.recordset[0]?.total_kg || 0);
+            totalPembelianRp = Number(statBeli.recordset[0]?.total_rp || 0);
+        } catch (e) {
+            try {
+                const statBeliOld = await sql.query`
+                    SELECT 
+                        COUNT(DISTINCT pm.id_penjualan) AS total_transaksi,
+                        ISNULL(SUM(dpm.berat_kirim_kg), 0) AS total_kg,
+                        ISNULL(SUM(dpm.berat_kirim_kg * dpm.harga_per_kg), 0) AS total_rp
+                    FROM t_penjualan_mitra pm
+                    LEFT JOIN t_detail_penjualan_mitra dpm ON pm.id_penjualan = dpm.id_penjualan
+                    WHERE pm.id_mitra = ${idMitra}
+                `;
+                totalTransaksiBeli = Number(statBeliOld.recordset[0]?.total_transaksi || 0);
+                totalBeratDibeliKg = Number(statBeliOld.recordset[0]?.total_kg || 0);
+                totalPembelianRp = Number(statBeliOld.recordset[0]?.total_rp || 0);
+            } catch (e2) {}
+        }
+
+        // 4. Rincian 4 Material dari Setoran Jemputan & Pembelian
+        let rincianMaterial = { plastik: 0, kardus: 0, kaca: 0, logam: 0, total_kg: 0 };
+        try {
+            const matRes = await sql.query`
+                SELECT 
+                    ISNULL(SUM(CASE WHEN js.nama_jenis LIKE '%Plastik%' THEN ds.berat_diterima_kg ELSE 0 END), 0) AS plastik,
+                    ISNULL(SUM(CASE WHEN js.nama_jenis LIKE '%Kardus%' THEN ds.berat_diterima_kg ELSE 0 END), 0) AS kardus,
+                    ISNULL(SUM(CASE WHEN js.nama_jenis LIKE '%Kaca%' THEN ds.berat_diterima_kg ELSE 0 END), 0) AS kaca,
+                    ISNULL(SUM(CASE WHEN js.nama_jenis LIKE '%Logam%' THEN ds.berat_diterima_kg ELSE 0 END), 0) AS logam,
+                    ISNULL(SUM(ds.berat_diterima_kg), 0) AS total_kg
+                FROM detail_setoran ds
+                JOIN jenis_sampah js ON ds.id_jenis_sampah = js.id_jenis_sampah
+            `;
+            if (matRes.recordset[0]) {
+                rincianMaterial = {
+                    plastik: Number(matRes.recordset[0].plastik || 0),
+                    kardus: Number(matRes.recordset[0].kardus || 0),
+                    kaca: Number(matRes.recordset[0].kaca || 0),
+                    logam: Number(matRes.recordset[0].logam || 0),
+                    total_kg: Number(matRes.recordset[0].total_kg || 0)
+                };
+            }
+        } catch (e) {}
+
+        // 5. Ambil daftar tugas penjemputan aktif & selesai untuk Kurir Mitra
+        let daftarJemputan = [];
+        try {
+            const jemputRes = await sql.query`
+                SELECT 
+                    p.id_penjemputan,
+                    p.id_setoran,
+                    p.alamat_jemput,
+                    p.status,
+                    p.potongan_persen_disepakati,
+                    s.catatan_pelanggan,
+                    s.dibuat_pada,
+                    pelanggan.nama AS nama_pelanggan,
+                    pelanggan.nama_usaha,
+                    pelanggan.no_hp AS no_hp_pelanggan,
+                    pelanggan.peran AS peran_pelanggan,
+                    sl.mulai_pada,
+                    sl.selesai_pada,
+                    kurir.nama AS nama_kurir,
+                    dp.nama_drop_point
+                FROM penjemputan p
+                JOIN setoran s ON p.id_setoran = s.id_setoran
+                JOIN pengguna pelanggan ON s.id_pengguna = pelanggan.id_pengguna
+                LEFT JOIN slot_jemput sl ON p.id_slot = sl.id_slot
+                LEFT JOIN pengguna kurir ON p.id_petugas = kurir.id_pengguna
+                LEFT JOIN drop_point dp ON s.id_drop_point = dp.id_drop_point
+                ORDER BY p.id_penjemputan DESC
+            `;
+            daftarJemputan = jemputRes.recordset;
+        } catch (e) {
+            try {
+                const jemputResOld = await sql.query`
+                    SELECT 
+                        p.id_penjemputan,
+                        p.id_setoran,
+                        p.alamat_jemput,
+                        p.status,
+                        p.potongan_persen_disepakati,
+                        s.catatan_pelanggan,
+                        s.dibuat_pada,
+                        pelanggan.nama AS nama_pelanggan,
+                        pelanggan.nama_usaha,
+                        pelanggan.no_hp AS no_hp_pelanggan,
+                        pelanggan.jenis_pelanggan,
+                        sl.mulai_pada,
+                        sl.selesai_pada,
+                        kurir.nama AS nama_kurir,
+                        dp.nama_drop_point
+                    FROM t_penjemputan p
+                    JOIN t_setoran s ON p.id_setoran = s.id_setoran
+                    JOIN m_pengguna pelanggan ON s.id_pelanggan = pelanggan.id_pengguna
+                    LEFT JOIN t_slot_jemput sl ON p.id_slot = sl.id_slot
+                    LEFT JOIN m_pengguna kurir ON p.id_petugas_mitra = kurir.id_pengguna
+                    LEFT JOIN m_drop_point dp ON s.id_drop_point = dp.id_drop_point
+                    ORDER BY p.id_penjemputan DESC
+                `;
+                daftarJemputan = jemputResOld.recordset;
+            } catch (e2) {}
+        }
+
+        const tugasAktif = daftarJemputan.filter(j =>
+            ['DIAJUKAN', 'DIJADWALKAN', 'DALAM_PERJALANAN', '1', '2', '3'].includes(String(j.status).toUpperCase())
+        );
+        const tugasSelesai = daftarJemputan.filter(j =>
+            ['SELESAI', 'FINAL', '4'].includes(String(j.status).toUpperCase())
+        );
+
+        return res.status(200).json({
+            status: 'success',
+            data: {
+                profil_mitra: profilMitra,
+                statistik: {
+                    total_pembelian_rp: totalPembelianRp,
+                    total_berat_kg: totalBeratDibeliKg > 0 ? totalBeratDibeliKg : rincianMaterial.total_kg,
+                    total_transaksi: totalTransaksiBeli > 0 ? totalTransaksiBeli : tugasSelesai.length,
+                    jumlah_tugas_aktif: tugasAktif.length,
+                    jumlah_tugas_selesai: tugasSelesai.length
+                },
+                material_kg: rincianMaterial,
+                jenis_sampah: jenisSampahList,
+                tugas_aktif: tugasAktif,
+                tugas_selesai: tugasSelesai
+            }
+        });
+    } catch (err) {
+        return res.status(500).json({ status: 'error', message: err.message });
+    }
+});
+
+// PATCH Ubah Status Penjemputan Kurir (Misal: DIJADWALKAN -> DALAM_PERJALANAN -> SELESAI)
+app.patch('/api/kurir-mitra/penjemputan/:id/status', async (req, res) => {
+    const { id } = req.params;
+    const { status } = req.body; // 'DALAM_PERJALANAN' | 'SELESAI'
+
+    try {
+        await sql.query`
+            UPDATE penjemputan 
+            SET status = ${status}, diubah_pada = GETUTCDATE()
+            WHERE id_penjemputan = ${id}
+        `;
+        return res.status(200).json({ status: 'success', message: `Status penjemputan diperbarui menjadi ${status}!` });
+    } catch (errFirst) {
+        try {
+            await sql.query`
+                UPDATE t_penjemputan 
+                SET status = ${status}
+                WHERE id_penjemputan = ${id}
+            `;
+            return res.status(200).json({ status: 'success', message: `Status penjemputan diperbarui menjadi ${status}!` });
+        } catch (errSecond) {
+            return res.status(500).json({ status: 'error', message: errSecond.message });
         }
     }
 });
