@@ -1150,3 +1150,195 @@ app.put('/api/setoran/terima/:id_setoran', async (req, res) => {
         res.status(500).json({ status: 'error', message: err.message });
     }
 });
+
+// =====================================================================
+// [BAGIAN ZAAFRANS] API MASTER DROP POINT (M03)
+// =====================================================================
+
+// POST: Tambah Drop Point Baru
+app.post('/api/drop-points', async (req, res) => {
+    let { nama_drop_point, alamat, latitude, longitude, jam_operasional, nama_komunitas, kontak_komunitas, dibuat_oleh } = req.body;
+    try {
+        const result = await sql.query`
+            INSERT INTO drop_point (nama_drop_point, alamat, latitude, longitude, jam_operasional, nama_komunitas, kontak_komunitas, aktif, dibuat_oleh, dibuat_pada, is_deleted)
+            OUTPUT INSERTED.*
+            VALUES (${nama_drop_point}, ${alamat}, ${latitude || null}, ${longitude || null}, ${jam_operasional}, ${nama_komunitas || null}, ${kontak_komunitas || null}, 1, ${dibuat_oleh || 2}, GETUTCDATE(), 0)
+        `;
+        res.status(201).json({ status: 'success', message: 'Drop Point berhasil ditambahkan!', data: result.recordset[0] });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+});
+
+// PUT: Ubah Data Drop Point
+app.put('/api/drop-points/:id', async (req, res) => {
+    const { id } = req.params;
+    let { nama_drop_point, alamat, latitude, longitude, jam_operasional, nama_komunitas, kontak_komunitas, aktif, diubah_oleh } = req.body;
+    try {
+        const result = await sql.query`
+            UPDATE drop_point
+            SET nama_drop_point = ${nama_drop_point}, alamat = ${alamat}, latitude = ${latitude || null}, longitude = ${longitude || null}, 
+                jam_operasional = ${jam_operasional}, nama_komunitas = ${nama_komunitas || null}, kontak_komunitas = ${kontak_komunitas || null}, 
+                aktif = ${aktif}, diubah_oleh = ${diubah_oleh || 2}, diubah_pada = GETUTCDATE()
+            OUTPUT INSERTED.*
+            WHERE id_drop_point = ${id} AND is_deleted = 0
+        `;
+        res.status(200).json({ status: 'success', message: 'Data Drop Point berhasil diperbarui!', data: result.recordset[0] });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+});
+
+// DELETE: Soft Delete Drop Point
+app.delete('/api/drop-points/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        await sql.query`UPDATE drop_point SET aktif = 0, is_deleted = 1, diubah_pada = GETUTCDATE() WHERE id_drop_point = ${id}`;
+        res.status(200).json({ status: 'success', message: 'Drop Point berhasil dihapus (soft-delete).' });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+});
+
+
+// =====================================================================
+// [BAGIAN ZAAFRANS] API TRANSAKSI SETORAN - VERIFIKASI FINAL (T05)
+// =====================================================================
+
+// PUT: Verifikasi Final (Ubah status jadi FINAL & Tentukan poin sah)
+app.put('/api/setoran/verifikasi/:id_setoran', async (req, res) => {
+    const { id_setoran } = req.params;
+    const { diverifikasi_oleh, catatan_verifikasi, detailVerifikasi } = req.body;
+
+    try {
+        // 1. Update Header ke FINAL (Status INT 3 = FINAL)
+        await sql.query`
+            UPDATE setoran 
+            SET status = 3, diverifikasi_oleh = ${diverifikasi_oleh}, waktu_verifikasi = GETUTCDATE(), catatan_verifikasi = ${catatan_verifikasi}
+            WHERE id_setoran = ${id_setoran}
+        `;
+        
+        // 2. Update Berat Diterima/Ditolak pada rincian material
+        for (let item of detailVerifikasi) {
+            await sql.query`
+                UPDATE detail_setoran 
+                SET berat_diterima_kg = ${item.berat_diterima_kg}, berat_ditolak_kg = ${item.berat_ditolak_kg}, alasan_penolakan = ${item.alasan_penolakan || null}
+                WHERE id_detail_setoran = ${item.id_detail_setoran}
+            `;
+        }
+        res.status(200).json({ status: 'success', message: 'Setoran FINAL. Poin pelanggan bertambah dan stok masuk!' });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+});
+
+
+// =====================================================================
+// [BAGIAN ZAAFRANS] API PENJUALAN MATERIAL & RETUR (T06)
+// =====================================================================
+
+// POST: Buat Penjualan & Kirim Barang ke Mitra (Status: DIKIRIM)
+app.post('/api/penjualan', async (req, res) => {
+    const { id_drop_point, id_mitra, dibuat_oleh, detailPenjualan, catatan } = req.body;
+    try {
+        const jual = await sql.query`
+            INSERT INTO penjualan (id_drop_point, id_mitra, tanggal_penjualan, waktu_pengiriman, status, catatan, dibuat_oleh, dibuat_pada, aktif)
+            OUTPUT INSERTED.id_penjualan
+            VALUES (${id_drop_point}, ${id_mitra}, CAST(GETUTCDATE() AS DATE), GETUTCDATE(), 'DIKIRIM', ${catatan || null}, ${dibuat_oleh}, GETUTCDATE(), 1)
+        `;
+        const id_penjualan_baru = jual.recordset[0].id_penjualan;
+
+        for (let item of detailPenjualan) {
+            await sql.query`
+                INSERT INTO detail_penjualan (id_penjualan, id_jenis_sampah, berat_dikirim_kg, harga_per_kg_snapshot, berat_retur_kembali_kg, dibuat_oleh, dibuat_pada, aktif)
+                VALUES (${id_penjualan_baru}, ${item.id_jenis_sampah}, ${item.berat_dikirim_kg}, ${item.harga_per_kg_snapshot}, 0, ${dibuat_oleh}, GETUTCDATE(), 1)
+            `;
+        }
+        res.status(201).json({ status: 'success', message: 'Material berhasil dikirim ke Mitra!' });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+});
+
+// PUT: Mitra Mengonfirmasi Barang (Status: DITERIMA / DITOLAK)
+app.put('/api/penjualan/konfirmasi/:id_penjualan', async (req, res) => {
+    const { id_penjualan } = req.params;
+    const { dikonfirmasi_oleh, detailKonfirmasi } = req.body; 
+    try {
+        await sql.query`
+            UPDATE penjualan 
+            SET status = 'DITERIMA', dikonfirmasi_oleh = ${dikonfirmasi_oleh}, waktu_terima_mitra = GETUTCDATE()
+            WHERE id_penjualan = ${id_penjualan}
+        `;
+
+        for (let item of detailKonfirmasi) {
+            await sql.query`
+                UPDATE detail_penjualan 
+                SET berat_diterima_kg = ${item.berat_diterima_kg}, berat_ditolak_kg = ${item.berat_ditolak_kg}, 
+                    alasan_penolakan = ${item.alasan_penolakan || null}, catatan_selisih_timbang = ${item.catatan_selisih_timbang || null}
+                WHERE id_detail_penjualan = ${item.id_detail_penjualan}
+            `;
+        }
+        res.status(200).json({ status: 'success', message: 'Konfirmasi penerimaan oleh Mitra berhasil disimpan.' });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+});
+
+// PUT: Drop Point Menerima Retur Fisik
+app.put('/api/penjualan/retur/:id_detail_penjualan', async (req, res) => {
+    const { id_detail_penjualan } = req.params;
+    const { berat_retur_kembali_kg } = req.body;
+    try {
+        await sql.query`
+            UPDATE detail_penjualan 
+            SET berat_retur_kembali_kg = ${berat_retur_kembali_kg}, waktu_retur_kembali = GETUTCDATE()
+            WHERE id_detail_penjualan = ${id_detail_penjualan}
+        `;
+        res.status(200).json({ status: 'success', message: 'Retur fisik berhasil dikembalikan ke stok Drop Point!' });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+});
+
+
+// =====================================================================
+// [BAGIAN ZAAFRANS] API LAPORAN STOK & PENJUALAN
+// =====================================================================
+
+// GET: Rekap Stok per Material
+app.get('/api/laporan/stok', async (req, res) => {
+    try {
+        const result = await sql.query`
+            SELECT 
+                js.nama_jenis,
+                (
+                    -- Total Barang Masuk dari Setoran FINAL & DITERIMA
+                    ISNULL((SELECT SUM(ds.berat_masuk_drop_point_kg) 
+                            FROM detail_setoran ds 
+                            JOIN setoran s ON ds.id_setoran = s.id_setoran 
+                            WHERE ds.id_jenis_sampah = js.id_jenis_sampah 
+                            AND s.status = 3 AND s.status_drop_point = 3), 0)
+                    -
+                    -- Dikurangi Barang Keluar (Penjualan DIKIRIM/DITERIMA/SELESAI)
+                    ISNULL((SELECT SUM(dp.berat_dikirim_kg) 
+                            FROM detail_penjualan dp 
+                            JOIN penjualan p ON dp.id_penjualan = p.id_penjualan 
+                            WHERE dp.id_jenis_sampah = js.id_jenis_sampah 
+                            AND p.status IN ('DIKIRIM', 'DITERIMA', 'SELESAI')), 0)
+                    +
+                    -- Ditambah Retur yang kembali fisiknya
+                    ISNULL((SELECT SUM(dp.berat_retur_kembali_kg) 
+                            FROM detail_penjualan dp 
+                            JOIN penjualan p ON dp.id_penjualan = p.id_penjualan 
+                            WHERE dp.id_jenis_sampah = js.id_jenis_sampah 
+                            AND p.status IN ('DITERIMA', 'SELESAI')), 0)
+                ) AS stok_tersedia_kg
+            FROM jenis_sampah js
+            WHERE js.aktif = 1 AND js.is_deleted = 0
+        `;
+        res.status(200).json({ status: 'success', data: result.recordset });
+    } catch (err) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+});
